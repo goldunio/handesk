@@ -6,45 +6,69 @@ use Carbon\Carbon;
 use App\Authenticatable\Admin;
 use App\Services\IssueCreator;
 use App\Events\TicketCommented;
-use App\Notifications\NewComment;
+use App\Notifications\RateTicket;
 use App\Authenticatable\Assistant;
 use App\Events\TicketStatusUpdated;
+use Illuminate\Support\Facades\App;
 use App\Notifications\TicketCreated;
 use App\Notifications\TicketAssigned;
 use App\Notifications\TicketEscalated;
+use App\Services\TicketLanguageDetector;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Ticket extends BaseModel
 {
-    use SoftDeletes, Taggable, Assignable, Subscribable;
+    use SoftDeletes, Taggable, Assignable, Subscribable, Rateable;
 
-    const STATUS_NEW                = 1;
-    const STATUS_OPEN               = 2;
-    const STATUS_PENDING            = 3;
-    const STATUS_SOLVED             = 4;
-    const STATUS_CLOSED             = 5;
-    const STATUS_MERGED             = 6;
-    const STATUS_SPAM               = 7;
+    const STATUS_NEW     = 1;
+    const STATUS_OPEN    = 2;
+    const STATUS_PENDING = 3;
+    const STATUS_SOLVED  = 4;
+    const STATUS_CLOSED  = 5;
+    const STATUS_MERGED  = 6;
+    const STATUS_SPAM    = 7;
 
-    const PRIORITY_LOW              = 1;
-    const PRIORITY_NORMAL           = 2;
-    const PRIORITY_HIGH             = 3;
+    const PRIORITY_LOW       = 1;
+    const PRIORITY_NORMAL    = 2;
+    const PRIORITY_HIGH      = 3;
+    const PRIORITY_BLOCKER   = 4;
 
     public static function createAndNotify($requester, $title, $body, $tags)
     {
-        $requester  = Requester::findOrCreate($requester['name'], $requester['email'] ?? null);
-        $ticket     = $requester->tickets()->create([
-            'title'         => $title,
-            'body'          => $body,
-            'public_token'  => str_random(24),
+        $requester = Requester::findOrCreate($requester['name'] ?? 'Unknown', $requester['email'] ?? null);
+        $ticket    = $requester->tickets()->create([
+            'title'        => substr($title, 0, 190),
+            'body'         => $body,
+            'public_token' => str_random(24),
+            'team_id'      => Settings::defaultTeamId(),
         ])->attachTags($tags);
-
-        tap(new TicketCreated($ticket), function ($newTicketNotification) use ($requester) {
+        tap(new TicketCreated($ticket), function ($newTicketNotification) use ($requester, $ticket) {
             Admin::notifyAll($newTicketNotification);
-            $requester->notify($newTicketNotification);
+            if ($ticket->team) {
+                $ticket->team->notify($newTicketNotification);
+            }
         });
 
         return $ticket;
+    }
+
+    public function updateWith($requester, $priority, $ticket_type_id)
+    {
+        $requester = Requester::findOrCreate($requester['name'] ?? 'Unknown', $requester['email'] ?? null);
+        $this->update([
+            'priority'       => $priority,
+            'requester_id'   => $requester->id,
+            'ticket_type_id' => $ticket_type_id,
+        ]);
+
+        return $this;
+    }
+
+    public function updateSummary($subject, $summary)
+    {
+        $this->update(['subject' => $subject, 'summary' => $summary]);
+
+        return $this;
     }
 
     public static function findWithPublicToken($public_token)
@@ -77,6 +101,11 @@ class Ticket extends BaseModel
         return $this->hasMany(Comment::class)->latest();
     }
 
+    public function commentsAndNotesAndEvents()
+    {
+        return $this->commentsAndNotes->toBase()->merge($this->events);
+    }
+
     public function events()
     {
         return $this->hasMany(TicketEvent::class)->latest();
@@ -95,6 +124,11 @@ class Ticket extends BaseModel
     public function mergedTickets()
     {
         return $this->belongsToMany(self::class, 'merged_tickets', 'ticket_id', 'merged_ticket_id');
+    }
+
+    public function type()
+    {
+        return $this->belongsTo(TicketType::class, 'ticket_type_id');
     }
 
     /**
@@ -137,14 +171,15 @@ class Ticket extends BaseModel
         }
         $previousStatus = $this->updateStatusFromComment($user, $newStatus);
         $this->associateUserIfNecessary($user);
-        if (! $body) {
-            return;
+
+        if (! $body || ($user && $body === $user->settings->tickets_signature)) {
+            return null;
         }
 
         $comment = $this->comments()->create([
-            'body'          => $body,
-            'user_id'       => $user ? $user->id : null,
-            'new_status'    => $newStatus ?: $this->status,
+            'body'       => $body,
+            'user_id'    => $user ? $user->id : null,
+            'new_status' => $newStatus ?: $this->status,
         ])->notifyNewComment();
         event(new TicketCommented($this, $comment, $previousStatus));
 
@@ -154,26 +189,19 @@ class Ticket extends BaseModel
     public function addNote($user, $body)
     {
         if (! $body) {
-            return;
+            return null;
         }
         //if( ! $this->user && $user) { $this->user()->associate($user)->save(); }  //We don't want the notes to automatically assign the user
         else {
             $this->touch();
         }
-        $comment = $this->comments()->create([
-            'body'          => $body,
-            'user_id'       => $user->id,
-            'new_status'    => $this->status,
-            'private'       => true,
-        ]);
-        tap(new NewComment($this, $comment), function ($newCommentNotification) {
-            if ($this->team) {
-                $this->team->notify($newCommentNotification);
-            }
-            Admin::notifyAll($newCommentNotification);
-        });
 
-        return $comment;
+        return $this->comments()->create([
+            'body'       => $body,
+            'user_id'    => $user->id,
+            'new_status' => $this->status,
+            'private'    => true,
+        ])->notifyNewNote();
     }
 
     public function merge($user, $tickets)
@@ -193,6 +221,15 @@ class Ticket extends BaseModel
     {
         $this->update(['status' => $status, 'updated_at' => Carbon::now()]);
         TicketEvent::make($this, 'Status updated: '.$this->statusName());
+        if ($status == Ticket::STATUS_SOLVED && ! $this->rating && config('handesk.sendRatingEmail')) {
+            $this->requester->notify((new RateTicket($this))->delay(now()->addMinutes(60)));
+        }
+    }
+
+    public function updatePriority($priority)
+    {
+        $this->update(['priority' => $priority, 'updated_at' => Carbon::now()]);
+        TicketEvent::make($this, 'Priority updated: '.$this->priorityName());
     }
 
     public function setLevel($level)
@@ -231,9 +268,9 @@ class Ticket extends BaseModel
         return ! in_array($this->status, [self::STATUS_CLOSED, self::STATUS_MERGED]);
     }
 
-    public function statusName()
+    public static function statusNameFor($status)
     {
-        switch ($this->status) {
+        switch ($status) {
             case static::STATUS_NEW: return 'new';
             case static::STATUS_OPEN: return 'open';
             case static::STATUS_PENDING: return 'pending';
@@ -242,6 +279,26 @@ class Ticket extends BaseModel
             case static::STATUS_MERGED: return 'merged';
             case static::STATUS_SPAM: return 'spam';
         }
+    }
+
+    public function statusName()
+    {
+        return static::statusNameFor($this->status);
+    }
+
+    public static function priorityNameFor($priority)
+    {
+        switch ($priority) {
+            case static::PRIORITY_LOW: return 'low';
+            case static::PRIORITY_NORMAL: return 'normal';
+            case static::PRIORITY_HIGH: return 'high';
+            case static::PRIORITY_BLOCKER: return 'blocker';
+        }
+    }
+
+    public function priorityName()
+    {
+        return static::priorityNameFor($this->priority);
     }
 
     public function getSubscribableEmail()
@@ -259,14 +316,16 @@ class Ticket extends BaseModel
     //========================================================
     public function createIssue(IssueCreator $issueCreator, $repository)
     {
+        $repo  = explode('/', $repository);
         $issue = $issueCreator->createIssue(
-                $repository,
-                $this->title,
-                'Issue from ticket: '.route('tickets.show', $this)."   \n\r".$this->body
+                $repo[0],
+                $repo[1],
+                $this->subject ?? $this->title,
+                'Issue from ticket: '.route('tickets.show', $this)."   \n\r".($this->summary ?? $this->body)
         );
-        $this->addNote(auth()->user(), "Issue created https://bitbucket.org{$issue->resource_uri} with id #{$issue->local_id}");
-        //TODO: Notify somebody? if so, create the test
-        TicketEvent::make($this, 'Issue created');
+        $issueUrl = "https://bitbucket.org/{$repository}/issues/{$issue->id}";
+        $this->addNote(auth()->user(), "Issue created {$issueUrl} with id #{$issue->id}");
+        TicketEvent::make($this, "Issue created #{$issue->id} at {$repository}");
 
         return $issue;
     }
@@ -296,8 +355,31 @@ class Ticket extends BaseModel
         }
         $start  = strpos($issueNote->body, 'https://');
         $end    = strpos($issueNote->body, 'with id');
-        $apiUrl = substr($issueNote->body, $start, $end - $start);
 
-        return str_replace('api.', '', str_replace('1.0/repositories/', '', $apiUrl));
+        return substr($issueNote->body, $start, $end - $start);
+    }
+
+    public function createIdea()
+    {
+        $idea = Idea::create([
+            'requester_id' => $this->requester_id,
+            'title'        => $this->title,
+            'body'         => $this->body,
+        ])->attachTags(['ticket']);
+        TicketEvent::make($this, "Idea created #{$idea->id}");
+        App::setLocale((new TicketLanguageDetector($this))->detect());
+        $this->addComment(auth()->user(), __('idea.fromTicket'), self::STATUS_SOLVED);
+
+        return $idea;
+    }
+
+    public function getIdeaId()
+    {
+        $issueEvent = $this->events()->where('body', 'like', '%Idea created%')->first();
+        if (! $issueEvent) {
+            return null;
+        }
+
+        return explode('#', $issueEvent->body)[1];
     }
 }

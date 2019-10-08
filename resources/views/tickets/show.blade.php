@@ -5,13 +5,14 @@
             <a href="{{ route('tickets.index') }}">{{ trans_choice('ticket.ticket', 2) }}</a>
         </div>
         <h3>#{{ $ticket->id }}. {{ $ticket->title }} </h3>
-        @busy <span class="label ticket-status-{{ $ticket->statusName() }}">{{ __("ticket." . $ticket->statusName() ) }}</span> &nbsp;
-        <span class="date">{{  $ticket->created_at->diffForHumans() }} · {{  $ticket->requester->name }} &lt;{{$ticket->requester->email}}&gt;</span>
-        {{--<a class="ml4" title="Public Link" href="{{route('requester.tickets.show',$ticket->public_token)}}"> @icon(globe) </a>--}}
+        <div class="mb2">
+            @include('components.ticket.rating')
+        </div>
 
         @include('components.ticket.actions')
-        <br>
+        @include('components.ticket.header')
         @include('components.ticket.merged')
+        <br>
     </div>
 
 
@@ -19,7 +20,7 @@
         @include('components.assignActions', ["endpoint" => "tickets", "object" => $ticket])
         <div class="comment new-comment">
             {{ Form::open(["url" => route("comments.store", $ticket) , "files" => true, "id" => "comment-form"]) }}
-            <textarea name="body"></textarea>
+            <textarea id="comment-text-area" name="body">@if(auth()->user()->settings->tickets_signature)&#13;&#13;{{ auth()->user()->settings->tickets_signature }}@endif</textarea>
             @include('components.uploadAttachment', ["attachable" => $ticket, "type" => "tickets"])
             {{ Form::hidden('new_status', $ticket->status, ["id" => "new_status"]) }}
             @if($ticket->isEscalated() )
@@ -39,16 +40,27 @@
             {{ Form::close() }}
         </div>
     @endif
-    @include('components.ticketComments', ["comments" => $ticket->commentsAndNotes->merge($ticket->events)->sortBy('created_at')->reverse() ])
+
+    @include('components.ticketComments', ["comments" => $ticket->commentsAndNotesAndEvents()->sortBy('created_at')->reverse() ])
 @endsection
 
 
 @section('scripts')
     @include('components.js.taggableInput', ["el" => "tags", "endpoint" => "tickets", "object" => $ticket])
+
     <script>
         function setStatusAndSubmit(new_status){
             $("#new_status").val(new_status);
             $("#comment-form").submit();
         }
+        $("#comment-text-area").mention({
+            delimiter: '@',
+            emptyQuery: true,
+            typeaheadOpts: {
+                items: 10 // Max number of items you want to show
+            },
+            users: {!! json_encode(App\Services\Mentions::arrayFor(auth()->user())) !!}
+        });
+
     </script>
 @endsection

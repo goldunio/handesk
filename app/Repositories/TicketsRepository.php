@@ -62,14 +62,21 @@ class TicketsRepository
         return auth()->user()->teamsTickets()->where('status', '=', Ticket::STATUS_CLOSED);
     }
 
-    public function search($text)
+    public function rated()
     {
         if (auth()->user()->admin) {
-            $leadsQuery = Ticket::query();
-        } else {
-            $leadsQuery = auth()->user()->teamsTickets();
+            return Ticket::whereNotNull('rating');
         }
 
-        return $leadsQuery->where('title', 'like', "%$text%")->orWhere('body', 'like', "%$text%");
+        return auth()->user()->teamsTickets()->whereNotNull('rating');
+    }
+
+    public function search($text)
+    {
+        $leadsQuery = auth()->user()->admin ? Ticket::query() : auth()->user()->teamsTickets();
+
+        return $leadsQuery->where(function ($query) use ($text) {
+            $query->where('title', 'like', "%{$text}%")->orWhere('body', 'like', "%{$text}%");
+        });
     }
 }

@@ -7,6 +7,7 @@ use App\User;
 use App\Ticket;
 use App\Kpi\Kpi;
 use Carbon\Carbon;
+use App\Kpi\RatedKpi;
 use App\Kpi\SolveKpi;
 use App\Kpi\ReopenedKpi;
 use App\Kpi\FirstReplyKpi;
@@ -23,18 +24,19 @@ class KpiRepository
         Kpi::KPI_ONE_TOUCH_RESOLUTION => 'oneTouchResolutionKpi',
         Kpi::KPI_REOPENED             => 'reopenedKpi',
         Kpi::KPI_UNANSWERED_TICKETS   => 'unansweredTickets',
+        Kpi::KPI_RATING               => 'ratingKpi',
     ];
 
     public function __construct($startDate = null, $endDate = null)
     {
-        $this->startDate    = $startDate ?: Carbon::today()->firstOfMonth();
-        $this->endDate      = $endDate ?: Carbon::tomorrow();
+        $this->startDate = $startDate ?: Carbon::today()->firstOfMonth();
+        $this->endDate   = $endDate ?: Carbon::tomorrow();
     }
 
     public function forDates($start, $end)
     {
-        $this->startDate    = $start;
-        $this->endDate      = $end;
+        $this->startDate = $start;
+        $this->endDate   = $end;
 
         return $this;
     }
@@ -79,6 +81,11 @@ class KpiRepository
         return $this->percentageKpi(ReopenedKpi::class, $agent, true);
     }
 
+    public function averageRating($agent = null)
+    {
+        return number_format($this->kpiAverage(RatedKpi::class, $agent), 2);
+    }
+
     public function average($kpi, $agent)
     {
         extract($this->getAverageValues($this->kpiFunctions[$kpi], $agent));
@@ -89,14 +96,14 @@ class KpiRepository
     protected function getAverageValues($functionName, $agent)
     {
         return [
-            'agentValue'      => $this->$functionName($agent),
-            'overallValue'    => $this->$functionName(),
+            'agentValue'   => $this->$functionName($agent),
+            'overallValue' => $this->$functionName(),
         ];
     }
 
     protected function ticketsQuery($agent = null)
     {
-        $query                             = Ticket::query();
+        $query = Ticket::query();
         if ($agent instanceof User) {
             $query = $query->where(['user_id' => $agent->id]);
         }
@@ -131,5 +138,18 @@ class KpiRepository
         }
 
         return toTime($kpi->forTeam($agent));
+    }
+
+    public function kpiAverage($kpi, $agent)
+    {
+        $kpi = (new RatedKpi)->forDates($this->startDate, $this->endDate);
+        if (! $agent) {
+            return $kpi->forType(Kpi::TYPE_USER);
+        }
+        if ($agent instanceof User) {
+            return $kpi->forUser(auth()->user());
+        }
+
+        return $kpi->forTeam($agent);
     }
 }

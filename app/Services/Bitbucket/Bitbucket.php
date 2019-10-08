@@ -2,68 +2,84 @@
 
 namespace App\Services\Bitbucket;
 
-use GuzzleHttp\Client;
-use GuzzleHttp\HandlerStack;
 use App\Services\IssueCreator;
-use GuzzleHttp\Subscriber\Oauth\Oauth1;
+use Bitbucket\API\Repositories\Issues;
+use App\Services\IssueTrackerException;
+use Bitbucket\API\Authentication\Basic;
+use Bitbucket\API\Http\Listener\OAuth2Listener;
 
 class Bitbucket implements IssueCreator
 {
-    protected function getClient()
+    protected $auth;
+    protected static $oauthParameters;
+
+    public static function setOAuth($parameters)
     {
-        if (config('issues.credentials.driver') == 'basic') {
-            return $this->getBasicAuthClient();
+        static::$oauthParameters = $parameters;
+    }
+
+    public function __construct()
+    {
+        $this->auth = new Basic(config('services.bitbucket.user'), config('services.bitbucket.password'));
+    }
+
+    public function createIssue($account, $repoSlug, $title, $content, $extra = [])
+    {
+        $issue = new Issues();
+        $this->setAuth($issue);
+
+        return $this->parseResponse(
+            $issue->create($account, $repoSlug, array_merge([
+                'title'     => $title,
+                'content'   => ['raw' => $content],
+                'kind'      => 'task',
+                'priority'  => 'major',
+                'status'    => 'new',
+            ], $extra))
+        );
+    }
+
+    public function updateIssue($account, $repoSlug, $id, $fields)
+    {
+        $issue = new Issues();
+        $this->setAuth($issue);
+
+        return $this->parseResponse(
+            $issue->update($account, $repoSlug, $id, $fields)
+        );
+    }
+
+    public function createComment($account, $repoSlug, $id, $comment)
+    {
+        $issue = new Issues();
+        $this->setAuth($issue);
+
+        return $this->parseResponse(
+            $issue->comments()->create($account, $repoSlug, $id, ["raw" => $comment])
+        );
+    }
+
+    public function parseResponse($response)
+    {
+        $response = json_decode($response->getContent());
+//        dd($response);
+        if (isset($response->type) && $response->type == 'error') {
+            throw new IssueTrackerException($response->error->message.':'.collect($response->error->fields)->map(function ($value, $key) {
+                return $key.' => '.$value;
+            })->implode("\n"));
         }
 
-        return $this->getOauthClient();
+        return $response;
     }
 
-    protected function getBasicAuthClient()
+    private function setAuth($class)
     {
-        return new Client([
-            'base_uri' => 'https://api.bitbucket.org/1.0/', //2.0 version gives an error for the content...
-            'auth'     => [config('issues.credentials.user'), config('issues.credentials.password')],
-        ]);
-    }
-
-    protected function getOauthClient()
-    {
-        $stack      = HandlerStack::create();
-        $middleware = new Oauth1([
-            'consumer_key'    => config('issues.credentials.key'),
-            'consumer_secret' => config('issues.credentials.secret'),
-            'token'           => '',
-            'token_secret'    => '',
-        ]);
-        $stack->push($middleware);
-
-        return new Client([
-            'base_uri' => 'https://api.bitbucket.org/1.0/', //2.0 version gives an error for the content...
-            'handler'  => $stack,
-            'auth'     => 'oauth',
-        ]);
-    }
-
-    // https://confluence.atlassian.com/bitbucket/issues-resource-296095191.html
-    // Try to fix it!
-
-    /**
-     * @param $repository string revo-pos/revo-back
-     * @param $title string
-     * @param $body string
-     *
-     * @return mixed object Bitbucket Issue object
-     */
-    public function createIssue($repository, $title, $body)
-    {
-        $response = $this->getClient()->post("repositories/{$repository}/issues", [
-            'form_params' => [
-                'title'   => $title,
-                'content' => $body,
-            ],
-        ]);
-        $responseJson = json_decode($response->getBody());
-
-        return $responseJson;
+        //$issue->setCredentials($this->auth);
+        $class->getClient()->setApiVersion('2.0')->addListener(
+            new OAuth2Listener(static::$oauthParameters ?? [
+                    'client_id'         => config('services.bitbucket.oauth.key'),
+                    'client_secret'     => config('services.bitbucket.oauth.secret'),
+                ])
+        );
     }
 }

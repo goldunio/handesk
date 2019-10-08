@@ -6,9 +6,10 @@ use App\User;
 use App\Requester;
 use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Notification;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 
-class NewComment extends Notification
+class NewComment extends Notification implements ShouldQueue
 {
     use Queueable;
 
@@ -17,8 +18,8 @@ class NewComment extends Notification
 
     public function __construct($ticket, $comment)
     {
-        $this->ticket   = $ticket;
-        $this->comment  = $comment;
+        $this->ticket  = $ticket;
+        $this->comment = $comment;
     }
 
     /**

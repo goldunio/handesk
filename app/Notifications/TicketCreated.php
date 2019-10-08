@@ -4,9 +4,10 @@ namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Notification;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 
-class TicketCreated extends Notification
+class TicketCreated extends Notification implements ShouldQueue
 {
     use Queueable;
 
@@ -26,7 +27,7 @@ class TicketCreated extends Notification
      */
     public function via($notifiable)
     {
-        if (isset($notifiable->settings) && $notifiable->settings->ticket_created_notification == false) {
+        if (isset($notifiable->settings) && $notifiable->settings->new_ticket_notification == false) {
             return [];
         }
 

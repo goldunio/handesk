@@ -28,6 +28,26 @@ class Team extends BaseModel
         return $this->hasMany(Ticket::class);
     }
 
+    public function leads()
+    {
+        return $this->hasMany(Lead::class);
+    }
+
+    public function openTickets()
+    {
+        return $this->tickets()->where('status', '<', Ticket::STATUS_SOLVED);
+    }
+
+    public function solvedTickets()
+    {
+        return $this->tickets()->where('status', '=', Ticket::STATUS_SOLVED);
+    }
+
+    public function closedTickets()
+    {
+        return $this->tickets()->where('status', '=', Ticket::STATUS_CLOSED);
+    }
+
     public function routeNotificationForSlack($full = false)
     {
         if ($full) {
@@ -42,7 +62,9 @@ class Team extends BaseModel
 
     public static function membersByTeam()
     {
-        return [__('team.none') => [null => '--']] + self::all()->mapWithKeys(function ($team) {
+        $usersWithoutTeam = User::has('teams', '<', 1)->pluck('name', 'id')->toArray();
+
+        return [__('team.none') => [null => '--'] + $usersWithoutTeam] + self::all()->mapWithKeys(function ($team) {
             return [$team->name => $team->members->pluck('name', 'id')->toArray()];
         })->toArray();
     }
